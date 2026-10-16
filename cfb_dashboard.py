@@ -13,7 +13,7 @@ st.set_page_config(
 )
 
 BASE = Path(__file__).resolve().parent
-PREDICTIONS = BASE / "live_market_predictions_2026.pkl"
+PREDICTIONS = BASE / "live_market_predictions_2026.csv"
 LEDGER = BASE / "official_picks_2026.csv"
 
 st.title("🏈 College Football Prediction Dashboard")
@@ -187,7 +187,7 @@ if st.sidebar.button(
         except Exception as exc:
             st.sidebar.error(f"Refresh failed: {exc}")
 
-live = pd.read_pickle(PREDICTIONS).copy()
+live = pd.read_csv(PREDICTIONS).copy()
 picks = pd.read_csv(LEDGER, dtype={"game_id": str})
 
 live["game_date"] = pd.to_datetime(
