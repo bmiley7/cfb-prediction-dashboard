@@ -190,6 +190,8 @@ else:
     picks = pd.read_csv(LEDGER, dtype={"game_id": str})
 
 
+live = pd.read_csv(PREDICTIONS).copy()
+
 live["game_date"] = pd.to_datetime(
     live["kickoff_eastern"]
 ).dt.strftime("%Y-%m-%d")
