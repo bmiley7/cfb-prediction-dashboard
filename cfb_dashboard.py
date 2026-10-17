@@ -29,6 +29,7 @@ def american_profit(odds):
     odds = float(odds)
     return odds / 100 if odds > 0 else 100 / abs(odds)
 
+@st.cache_data(ttl=900, show_spinner=False)
 def grade_games(api_key):
     response = requests.get(
         "https://api.collegefootballdata.com/games",
@@ -126,10 +127,6 @@ def grade_games(api_key):
                 )
             picks.at[index, "totals_result"] = totals_result
 
-    tmp = LEDGER.with_suffix(".tmp")
-    picks.to_csv(tmp, index=False)
-    os.replace(tmp, LEDGER)
-
     return picks
 
 def summarize(picks, column, odds_column=None):
@@ -166,29 +163,32 @@ def summarize(picks, column, odds_column=None):
 # Sidebar API key for manual result updates.
 st.sidebar.header("Dashboard Controls")
 
-api_key = st.sidebar.text_input(
-    "CFBD API key (for grading)",
-    type="password",
-    help="Used only to request final game results."
-)
+try:
+    api_key = st.secrets.get("CFBD_API_KEY", "")
+except Exception:
+    api_key = ""
 
-if st.sidebar.button(
-    "Refresh Final Scores & Grade Picks",
-    width="stretch"
-):
-    if not api_key:
-        st.sidebar.warning("Enter your CFBD API key first.")
-    else:
-        try:
-            with st.spinner("Fetching scores and grading picks..."):
-                grade_games(api_key)
-            st.sidebar.success("Results updated successfully.")
-            st.rerun()
-        except Exception as exc:
-            st.sidebar.error(f"Refresh failed: {exc}")
+if st.sidebar.button("Refresh Final Scores"):
+    grade_games.clear()
 
-live = pd.read_csv(PREDICTIONS).copy()
-picks = pd.read_csv(LEDGER, dtype={"game_id": str})
+if api_key:
+    try:
+        with st.spinner("Checking official game results..."):
+            picks = grade_games(api_key)
+        st.sidebar.success("Official scores connected")
+    except Exception as exc:
+        st.sidebar.warning(
+            "Official scores temporarily unavailable. "
+            "Showing saved picks."
+        )
+        picks = pd.read_csv(LEDGER, dtype={"game_id": str})
+else:
+    st.sidebar.warning(
+        "Automatic grading awaits CFBD_API_KEY "
+        "in Streamlit app secrets."
+    )
+    picks = pd.read_csv(LEDGER, dtype={"game_id": str})
+
 
 live["game_date"] = pd.to_datetime(
     live["kickoff_eastern"]
