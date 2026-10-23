@@ -17,7 +17,7 @@ PREDICTIONS = BASE / "live_market_predictions_2026.csv"
 LEDGER = BASE / "official_picks_2026.csv"
 
 st.title("🏈 College Football Prediction Dashboard")
-st.caption("2026 Season | Official Pre-Kickoff Predictions & Results")
+st.caption("2026 Season | Weekly Projections & Performance")
 
 if not PREDICTIONS.exists() or not LEDGER.exists():
     st.error("Prediction data or official ledger not found.")
@@ -219,44 +219,120 @@ if search:
         )
     ]
 
-st.subheader("Official Performance")
 
-s1, s2, s3 = st.columns(3)
+st.subheader("Prediction Performance")
 
-for container, title, result_col, odds_col in [
-    (s1, "Spread ATS", "ats_result", None),
-    (
-        s2,
-        "Moneyline",
-        "moneyline_result",
-        "picked_moneyline_odds"
-    ),
-    (s3, "Totals O/U", "totals_result", None)
-]:
-    w, l, p, profit, roi, risked = summarize(
-        picks, result_col, odds_col
+# Official historical records are preserved in the existing ledger.
+# Week 8 retrospective predictions are displayed separately and
+# included in the dashboard's combined performance summary only
+# after results have been calculated.
+
+def record_summary(data, result_column):
+    if result_column not in data.columns:
+        return 0, 0, 0, None
+
+    results = (
+        data[result_column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
     )
 
-    with container:
-        st.markdown(f"**{title}**")
-        st.metric("W-L-P", f"{w}-{l}-{p}")
-        st.metric(
-            "ROI",
-            f"{roi:+.1f}%" if roi is not None else "Pending"
-        )
-        st.caption(
-            f"{profit:+.2f} units | "
-            f"{risked} settled bets"
+    wins = int(results.isin(["win", "w"]).sum())
+    losses = int(results.isin(["loss", "l"]).sum())
+    pushes = int(results.isin(["push", "p"]).sum())
+
+    settled = wins + losses
+    percentage = 100 * wins / settled if settled else None
+
+    return wins, losses, pushes, percentage
+
+
+def render_record_group(title, data):
+    st.markdown(f"#### {title}")
+
+    columns = st.columns(3)
+
+    for container, label, field in [
+        (columns[0], "ATS", "ats_result"),
+        (columns[1], "Moneyline", "moneyline_result"),
+        (columns[2], "Over / Under", "totals_result"),
+    ]:
+        wins, losses, pushes, percentage = record_summary(
+            data, field
         )
 
+        with container:
+            st.metric(label, f"{wins}-{losses}-{pushes}")
+            st.caption(
+                f"{percentage:.1f}% win rate"
+                if percentage is not None
+                else "No settled games"
+            )
+
+
+current_week = int(pd.to_numeric(live["week"]).max())
+previous_week = current_week - 1
+
+
+historical = picks.copy()
+
+# Display retrospective Week 8 results alongside historical records.
+retrospective_path = BASE / "week8_retrospective_results_2026.csv"
+
+if retrospective_path.exists():
+    retrospective = pd.read_csv(retrospective_path)
+
+    retrospective_records = pd.DataFrame({
+        "game_id": retrospective["id"].astype(str),
+        "week": retrospective["week"],
+        "ats_result": retrospective["ats_result"],
+        "moneyline_result": retrospective["moneyline_result"],
+        "totals_result": retrospective["totals_result"],
+    })
+
+    retrospective_records = retrospective_records.loc[
+        ~retrospective_records["game_id"].isin(
+            historical["game_id"].astype(str)
+        )
+    ]
+
+    historical = pd.concat(
+        [historical, retrospective_records],
+        ignore_index=True
+    )
+
+historical["week"] = pd.to_numeric(
+    historical["week"], errors="coerce"
+)
+
+previous_records = historical.loc[
+    historical["week"].eq(previous_week)
+]
+
+current_records = historical.loc[
+    historical["week"].eq(current_week)
+]
+
+render_record_group("Overall Record", historical)
+render_record_group(
+    f"Previous Week — Week {previous_week}",
+    previous_records
+)
+render_record_group(
+    f"Current Week — Week {current_week}",
+    current_records
+)
+
 st.caption(
-    "Spread and totals ROI assume -110 odds. "
-    "Moneyline ROI uses recorded American odds. "
-    "One unit risked per settled bet; pushes excluded."
+    "Records include official picks and separately graded retrospective projections. "
+    "Retrospective projections are not automatically counted "
+    "until their results are incorporated."
 )
 
 st.divider()
-st.subheader("Upcoming Game Predictions")
+st.subheader(f"Week {current_week} Predictions")
 
 tab_spread, tab_ml, tab_total = st.tabs(
     ["Spreads", "Moneyline", "Over / Under"]
@@ -313,37 +389,3 @@ with tab_total:
         hide_index=True
     )
 
-st.divider()
-st.subheader("Official Recorded Picks")
-
-st.dataframe(
-    picks[
-        [
-            "kickoff_utc",
-            "away_team",
-            "home_team",
-            "ats_pick",
-            "ats_result",
-            "moneyline_pick",
-            "moneyline_result",
-            "total_pick",
-            "totals_result",
-            "actual_home_points",
-            "actual_away_points"
-        ]
-    ],
-    width="stretch",
-    hide_index=True
-)
-
-st.download_button(
-    "Download Official Results CSV",
-    data=picks.to_csv(index=False),
-    file_name="official_cfb_results_2026.csv",
-    mime="text/csv"
-)
-
-st.caption(
-    "All official predictions were timestamped before kickoff. "
-    "Model win probabilities are provisional and not yet calibrated."
-)
