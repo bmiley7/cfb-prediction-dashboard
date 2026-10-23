@@ -192,9 +192,28 @@ else:
 
 live = pd.read_csv(PREDICTIONS).copy()
 
-live["game_date"] = pd.to_datetime(
-    live["kickoff_eastern"]
-).dt.strftime("%Y-%m-%d")
+# Parse kickoff timestamps consistently across pandas versions.
+# Prefer the source UTC timestamp rather than formatted Eastern text.
+if "startDate" in live.columns and live["startDate"].notna().any():
+    kickoff = pd.to_datetime(
+        live["startDate"], utc=True, errors="coerce",
+        format="mixed"
+    )
+elif "kickoff_utc" in live.columns and live["kickoff_utc"].notna().any():
+    kickoff = pd.to_datetime(
+        live["kickoff_utc"], utc=True, errors="coerce",
+        format="mixed"
+    )
+else:
+    kickoff = pd.to_datetime(
+        live["kickoff_eastern"], utc=True,
+        errors="coerce", format="mixed"
+    )
+
+live["game_date"] = (
+    kickoff.dt.tz_convert("America/New_York")
+    .dt.strftime("%Y-%m-%d")
+)
 
 live["matchup"] = (
     live["awayTeam"] + " @ " + live["homeTeam"]
