@@ -180,12 +180,6 @@ def fetch_week8_scores(key):
 
 # Sidebar API key for manual result updates.
 
-@st.fragment(run_every="15m")
-def refresh_dashboard_timer():
-    st.rerun(scope="app")
-
-refresh_dashboard_timer()
-
 st.sidebar.header("Dashboard Controls")
 
 try:
