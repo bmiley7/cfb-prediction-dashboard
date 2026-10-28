@@ -160,7 +160,32 @@ def summarize(picks, column, odds_column=None):
     roi = 100 * profit / risked if risked else None
     return wins, losses, pushes, profit, roi, int(risked)
 
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_week8_scores(key):
+    response = requests.get(
+        "https://api.collegefootballdata.com/games",
+        headers={"Authorization": f"Bearer {key}"},
+        params={
+            "year": 2026,
+            "week": 8,
+            "seasonType": "regular",
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    games = pd.DataFrame(response.json())
+    games["id"] = games["id"].astype(str)
+    return games.set_index("id")
+
+
 # Sidebar API key for manual result updates.
+
+@st.fragment(run_every="15m")
+def refresh_dashboard_timer():
+    st.rerun(scope="app")
+
+refresh_dashboard_timer()
+
 st.sidebar.header("Dashboard Controls")
 
 try:
@@ -170,6 +195,8 @@ except Exception:
 
 if st.sidebar.button("Refresh Final Scores"):
     grade_games.clear()
+    if "fetch_week8_scores" in globals():
+        fetch_week8_scores.clear()
 
 if api_key:
     try:
@@ -303,6 +330,7 @@ retrospective_path = BASE / "week8_retrospective_results_2026.csv"
 if retrospective_path.exists():
     retrospective = pd.read_csv(retrospective_path)
 
+
     retrospective_records = pd.DataFrame({
         "game_id": retrospective["id"].astype(str),
         "week": retrospective["week"],
@@ -310,6 +338,86 @@ if retrospective_path.exists():
         "moneyline_result": retrospective["moneyline_result"],
         "totals_result": retrospective["totals_result"],
     })
+
+    # Regrade Week 8 using the current CFBD game results.
+    if api_key:
+        try:
+
+            scores = fetch_week8_scores(api_key)
+
+            for idx, game in retrospective.iterrows():
+                game_id = str(game["id"])
+
+                if game_id not in scores.index:
+                    continue
+
+                actual = scores.loc[game_id]
+
+                if (
+                    not bool(actual["completed"])
+                    or pd.isna(actual["homePoints"])
+                    or pd.isna(actual["awayPoints"])
+                ):
+                    continue
+
+                home = float(actual["homePoints"])
+                away = float(actual["awayPoints"])
+                margin = home - away
+                total = home + away
+
+                spread = pd.to_numeric(
+                    game["market_home_spread"], errors="coerce"
+                )
+
+                if pd.notna(spread):
+                    cover = margin + spread
+                    if abs(cover) < 1e-9:
+                        ats = "Push"
+                    else:
+                        picked_home = (
+                            game["ats_pick"] == game["homeTeam"]
+                        )
+                        ats = (
+                            "Win" if (cover > 0) == picked_home
+                            else "Loss"
+                        )
+                    retrospective_records.at[idx, "ats_result"] = ats
+
+                if margin == 0:
+                    ml = "Push"
+                else:
+                    winner = (
+                        game["homeTeam"]
+                        if margin > 0 else game["awayTeam"]
+                    )
+                    ml = (
+                        "Win" if game["moneyline_pick"] == winner
+                        else "Loss"
+                    )
+                retrospective_records.at[idx, "moneyline_result"] = ml
+
+                market_total = pd.to_numeric(
+                    game["market_total"], errors="coerce"
+                )
+                if pd.notna(market_total):
+                    if abs(total - market_total) < 1e-9:
+                        ou = "Push"
+                    else:
+                        ou = (
+                            "Win"
+                            if (
+                                (total > market_total)
+                                == (game["total_pick"] == "Over")
+                            )
+                            else "Loss"
+                        )
+                    retrospective_records.at[idx, "totals_result"] = ou
+
+        except Exception as exc:
+            st.warning(
+                "Live Week 8 scores unavailable; "
+                "using last saved results."
+            )
 
     retrospective_records = retrospective_records.loc[
         ~retrospective_records["game_id"].isin(
