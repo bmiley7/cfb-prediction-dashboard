@@ -13,15 +13,13 @@ st.set_page_config(
 )
 
 BASE = Path(__file__).resolve().parent
-# Isolated Week 9 staging dataset.
 PREDICTIONS = BASE / "live_market_predictions_2026.csv"
 LEDGER = BASE / "official_picks_2026.csv"
-HISTORY = BASE / "prediction_history_2026.csv"
 
 st.title("🏈 College Football Prediction Dashboard")
-st.caption("2026 Season | Automated Weekly Predictions")
+st.caption("2026 Season | Weekly Projections & Performance")
 
-if not PREDICTIONS.exists() or not HISTORY.exists():
+if not PREDICTIONS.exists() or not LEDGER.exists():
     st.error("Prediction data or official ledger not found.")
     st.stop()
 
@@ -33,40 +31,33 @@ def american_profit(odds):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def grade_games(api_key):
-    """Grade every historical prediction using completed CFBD scores."""
-    history = pd.read_csv(HISTORY, dtype={"game_id": str})
-
-    for column in ("ats_result", "moneyline_result", "totals_result"):
-        history[column] = pd.NA
-
     response = requests.get(
         "https://api.collegefootballdata.com/games",
         headers={"Authorization": f"Bearer {api_key}"},
         params={"year": 2026, "seasonType": "regular"},
-        timeout=90,
+        timeout=90
     )
     response.raise_for_status()
 
-    scores = pd.DataFrame(response.json())
+    games = pd.DataFrame(response.json())
+    games["id"] = games["id"].astype(str)
 
-    if scores.empty:
-        return history
-
-    scores["id"] = scores["id"].astype(str)
-    scores["homePoints"] = pd.to_numeric(
-        scores["homePoints"], errors="coerce"
+    games["homePoints"] = pd.to_numeric(
+        games["homePoints"], errors="coerce"
     )
-    scores["awayPoints"] = pd.to_numeric(
-        scores["awayPoints"], errors="coerce"
+    games["awayPoints"] = pd.to_numeric(
+        games["awayPoints"], errors="coerce"
     )
 
-    completed = scores.loc[
-        scores["completed"].eq(True)
-        & scores["homePoints"].notna()
-        & scores["awayPoints"].notna()
+    completed = games[
+        games["completed"].eq(True)
+        & games["homePoints"].notna()
+        & games["awayPoints"].notna()
     ].set_index("id")
 
-    for idx, pick in history.iterrows():
+    picks = pd.read_csv(LEDGER, dtype={"game_id": str})
+
+    for index, pick in picks.iterrows():
         game_id = str(pick["game_id"])
 
         if game_id not in completed.index:
@@ -78,44 +69,65 @@ def grade_games(api_key):
         margin = home - away
         total = home + away
 
-        spread = float(pick["market_home_spread"])
-        cover = margin + spread
+        picks.at[index, "actual_home_points"] = home
+        picks.at[index, "actual_away_points"] = away
 
-        if abs(cover) < 1e-9:
-            ats = "Push"
+        # Spread grading at ORIGINAL recorded line.
+        cover_margin = margin + float(
+            pick["market_home_spread"]
+        )
+
+        if abs(cover_margin) < 1e-9:
+            ats_result = "Push"
         else:
+            home_covers = cover_margin > 0
             picked_home = pick["ats_pick"] == pick["home_team"]
-            ats = "Win" if (cover > 0) == picked_home else "Loss"
-
-        if margin == 0:
-            moneyline = "Push"
-        else:
-            winner = (
-                pick["home_team"] if margin > 0
-                else pick["away_team"]
-            )
-            moneyline = (
-                "Win" if pick["moneyline_pick"] == winner else "Loss"
+            ats_result = (
+                "Win" if home_covers == picked_home else "Loss"
             )
 
-        market_total = float(pick["market_total"])
+        picks.at[index, "ats_result"] = ats_result
 
-        if abs(total - market_total) < 1e-9:
-            totals = "Push"
-        else:
-            over_won = total > market_total
-            totals = (
-                "Win" if (pick["total_pick"] == "Over") == over_won
-                else "Loss"
-            )
+        # Moneyline grading using recorded moneyline selection.
+        ml_pick = pick.get("moneyline_pick")
 
-        history.at[idx, "ats_result"] = ats
-        history.at[idx, "moneyline_result"] = moneyline
-        history.at[idx, "totals_result"] = totals
+        if pd.notna(ml_pick) and ml_pick in [
+            pick["home_team"], pick["away_team"]
+        ]:
+            if margin == 0:
+                ml_result = "Push"
+            else:
+                winner = (
+                    pick["home_team"]
+                    if margin > 0 else pick["away_team"]
+                )
+                ml_result = (
+                    "Win" if ml_pick == winner else "Loss"
+                )
+            picks.at[index, "moneyline_result"] = ml_result
 
-    return history
+        # Totals grading at ORIGINAL recorded total.
+        total_pick = pick.get("total_pick")
+        market_total = pd.to_numeric(
+            pick.get("market_total"), errors="coerce"
+        )
 
+        if (
+            pd.notna(market_total)
+            and total_pick in ["Over", "Under"]
+        ):
+            if abs(total - market_total) < 1e-9:
+                totals_result = "Push"
+            else:
+                over_won = total > market_total
+                totals_result = (
+                    "Win"
+                    if (total_pick == "Over") == over_won
+                    else "Loss"
+                )
+            picks.at[index, "totals_result"] = totals_result
 
+    return picks
 
 def summarize(picks, column, odds_column=None):
     result = picks[column].fillna("Pending")
@@ -177,21 +189,26 @@ except Exception:
 
 if st.sidebar.button("Refresh Final Scores"):
     grade_games.clear()
+    if "fetch_week8_scores" in globals():
+        fetch_week8_scores.clear()
 
-if not api_key:
-    st.error("CFBD_API_KEY is not configured in Streamlit secrets.")
-    st.stop()
-
-try:
-    with st.spinner("Checking official game results..."):
-        picks = grade_games(str(api_key).strip())
-    st.sidebar.success("Official scores connected")
-except Exception:
-    st.error(
-        "Official game results are temporarily unavailable. "
-        "Please reload the dashboard when CFBD service is restored."
+if api_key:
+    try:
+        with st.spinner("Checking official game results..."):
+            picks = grade_games(api_key)
+        st.sidebar.success("Official scores connected")
+    except Exception as exc:
+        st.sidebar.warning(
+            "Official scores temporarily unavailable. "
+            "Showing saved picks."
+        )
+        picks = pd.read_csv(LEDGER, dtype={"game_id": str})
+else:
+    st.sidebar.warning(
+        "Automatic grading awaits CFBD_API_KEY "
+        "in Streamlit app secrets."
     )
-    st.stop()
+    picks = pd.read_csv(LEDGER, dtype={"game_id": str})
 
 
 live = pd.read_csv(PREDICTIONS).copy()
@@ -245,9 +262,10 @@ if search:
 
 st.subheader("Prediction Performance")
 
-# Unified history includes official pre-kickoff picks and Week 8
-# retrospective projections. Completed games are graded automatically.
-# Pending games do not affect win-rate calculations.
+# Official historical records are preserved in the existing ledger.
+# Week 8 retrospective predictions are displayed separately and
+# included in the dashboard's combined performance summary only
+# after results have been calculated.
 
 def record_summary(data, result_column):
     if result_column not in data.columns:
@@ -300,6 +318,112 @@ previous_week = current_week - 1
 
 historical = picks.copy()
 
+# Display retrospective Week 8 results alongside historical records.
+retrospective_path = BASE / "week8_retrospective_results_2026.csv"
+
+if retrospective_path.exists():
+    retrospective = pd.read_csv(retrospective_path)
+
+
+    retrospective_records = pd.DataFrame({
+        "game_id": retrospective["id"].astype(str),
+        "week": retrospective["week"],
+        "ats_result": retrospective["ats_result"],
+        "moneyline_result": retrospective["moneyline_result"],
+        "totals_result": retrospective["totals_result"],
+    })
+
+    # Regrade Week 8 using the current CFBD game results.
+    if api_key:
+        try:
+
+            scores = fetch_week8_scores(api_key)
+
+            for idx, game in retrospective.iterrows():
+                game_id = str(game["id"])
+
+                if game_id not in scores.index:
+                    continue
+
+                actual = scores.loc[game_id]
+
+                if (
+                    not bool(actual["completed"])
+                    or pd.isna(actual["homePoints"])
+                    or pd.isna(actual["awayPoints"])
+                ):
+                    continue
+
+                home = float(actual["homePoints"])
+                away = float(actual["awayPoints"])
+                margin = home - away
+                total = home + away
+
+                spread = pd.to_numeric(
+                    game["market_home_spread"], errors="coerce"
+                )
+
+                if pd.notna(spread):
+                    cover = margin + spread
+                    if abs(cover) < 1e-9:
+                        ats = "Push"
+                    else:
+                        picked_home = (
+                            game["ats_pick"] == game["homeTeam"]
+                        )
+                        ats = (
+                            "Win" if (cover > 0) == picked_home
+                            else "Loss"
+                        )
+                    retrospective_records.at[idx, "ats_result"] = ats
+
+                if margin == 0:
+                    ml = "Push"
+                else:
+                    winner = (
+                        game["homeTeam"]
+                        if margin > 0 else game["awayTeam"]
+                    )
+                    ml = (
+                        "Win" if game["moneyline_pick"] == winner
+                        else "Loss"
+                    )
+                retrospective_records.at[idx, "moneyline_result"] = ml
+
+                market_total = pd.to_numeric(
+                    game["market_total"], errors="coerce"
+                )
+                if pd.notna(market_total):
+                    if abs(total - market_total) < 1e-9:
+                        ou = "Push"
+                    else:
+                        ou = (
+                            "Win"
+                            if (
+                                (total > market_total)
+                                == (game["total_pick"] == "Over")
+                            )
+                            else "Loss"
+                        )
+                    retrospective_records.at[idx, "totals_result"] = ou
+
+        except Exception as exc:
+            st.warning(
+                "Live Week 8 scores unavailable; "
+                "using last saved results."
+            )
+
+    retrospective_records = retrospective_records.loc[
+        ~retrospective_records["game_id"].isin(
+            historical["game_id"].astype(str)
+        )
+    ]
+
+    historical = pd.concat(
+        [historical, retrospective_records],
+        ignore_index=True
+    )
+
 historical["week"] = pd.to_numeric(
     historical["week"], errors="coerce"
 )
@@ -323,11 +447,9 @@ render_record_group(
 )
 
 st.caption(
-    "Performance includes official pre-kickoff picks and Week 8 "
-    "retrospective projections. Week 8 predictions were generated "
-    "after the games and are not a verified pregame track record. "
-    "Completed games are graded automatically; pending games "
-    "do not affect win percentages."
+    "Records include official picks and separately graded retrospective projections. "
+    "Retrospective projections are not automatically counted "
+    "until their results are incorporated."
 )
 
 st.divider()
